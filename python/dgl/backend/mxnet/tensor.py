@@ -94,11 +94,12 @@ def stack(seq, dim):
 
 def split(x, sizes_or_sections, dim):
     if isinstance(sizes_or_sections, list) or isinstance(sizes_or_sections, np.ndarray):
-        # TODO: fallback to numpy is unfortunate
-        np_arr = x.asnumpy()
         indices = np.cumsum(sizes_or_sections)[:-1]
-        res = np.split(np_arr, indices, axis=dim)
-        return [tensor(arr, dtype=x.dtype) for arr in res]
+        if len(indices) > 0:
+            ret = mx.nd.split(x, indices=indices.tolist(), axis=dim)
+        else:
+            ret = [x]
+        return ret
     else:
         return nd.split(x, sizes_or_sections, axis=dim)
 
