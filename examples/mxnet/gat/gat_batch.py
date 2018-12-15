@@ -18,8 +18,14 @@ from dgl.data import register_data_args, load_data
 def elu(data):
     return mx.nd.LeakyReLU(data, act_type='elu')
 
-def gat_message(edges):
-    return {'ft' : edges.src['ft'], 'a2' : edges.src['a2']}
+class GATMessage(gluon.Block):
+    def __init__(self):
+        super(GATMessage, self).__init__()
+        self.attn = gluon.nn.Dense(1)
+
+    def forward(self, edges):
+        ft = mx.nd.concat(edges.src['ft'], edges.dst['ft'], dim=1)
+        return {'ft' : edges.src['ft'], 'a' : mx.nd.LeakyReLU(self.attn(ft))}
 
 class GATReduce(gluon.Block):
     def __init__(self, attn_drop):
@@ -27,12 +33,9 @@ class GATReduce(gluon.Block):
         self.attn_drop = attn_drop
 
     def forward(self, nodes):
-        a1 = mx.nd.expand_dims(nodes.data['a1'], 1)  # shape (B, 1, 1)
-        a2 = nodes.mailbox['a2'] # shape (B, deg, 1)
+        a = nodes.mailbox['a'] # shape (B, deg, 1)
         ft = nodes.mailbox['ft'] # shape (B, deg, D)
-        # attention
-        a = a1 + a2  # shape (B, deg, 1)
-        e = mx.nd.softmax(mx.nd.LeakyReLU(a))
+        e = mx.nd.softmax(a)
         if self.attn_drop != 0.0:
             e = mx.nd.Dropout(e, self.attn_drop)
         return {'accum' : mx.nd.sum(e * ft, axis=1)} # shape (B, D)
@@ -62,17 +65,13 @@ class GATPrepare(gluon.Block):
         super(GATPrepare, self).__init__()
         self.fc = gluon.nn.Dense(hiddendim)
         self.drop = drop
-        self.attn_l = gluon.nn.Dense(1)
-        self.attn_r = gluon.nn.Dense(1)
 
     def forward(self, feats):
         h = feats
         if self.drop != 0.0:
             h = mx.nd.Dropout(h, self.drop)
         ft = self.fc(h)
-        a1 = self.attn_l(ft)
-        a2 = self.attn_r(ft)
-        return {'h' : h, 'ft' : ft, 'a1' : a1, 'a2' : a2}
+        return {'h' : h, 'ft' : ft}
 
 class GAT(gluon.Block):
     def __init__(self,
@@ -91,11 +90,13 @@ class GAT(gluon.Block):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.prp = gluon.nn.Sequential()
+        self.msg = gluon.nn.Sequential()
         self.red = gluon.nn.Sequential()
         self.fnl = gluon.nn.Sequential()
         # input projection (no residual)
         for hid in range(num_heads):
             self.prp.add(GATPrepare(in_dim, num_hidden, in_drop))
+            self.msg.add(GATMessage())
             self.red.add(GATReduce(attn_drop))
             self.fnl.add(GATFinalize(hid, in_dim, num_hidden, activation, False))
         # hidden layers
@@ -103,16 +104,19 @@ class GAT(gluon.Block):
             for hid in range(num_heads):
                 # due to multi-head, the in_dim = num_hidden * num_heads
                 self.prp.add(GATPrepare(num_hidden * num_heads, num_hidden, in_drop))
+                self.msg.add(GATMessage())
                 self.red.add(GATReduce(attn_drop))
                 self.fnl.add(GATFinalize(hid, num_hidden * num_heads,
                                          num_hidden, activation, residual))
         # output projection
         self.prp.add(GATPrepare(num_hidden * num_heads, num_classes, in_drop))
+        self.msg.add(GATMessage())
         self.red.add(GATReduce(attn_drop))
         self.fnl.add(GATFinalize(0, num_hidden * num_heads,
                                  num_classes, activation, residual))
         # sanity check
         assert len(self.prp) == self.num_layers * self.num_heads + 1
+        assert len(self.msg) == self.num_layers * self.num_heads + 1
         assert len(self.red) == self.num_layers * self.num_heads + 1
         assert len(self.fnl) == self.num_layers * self.num_heads + 1
 
@@ -124,14 +128,14 @@ class GAT(gluon.Block):
                 # prepare
                 self.g.set_n_repr(self.prp[i](last))
                 # message passing
-                self.g.update_all(gat_message, self.red[i], self.fnl[i])
+                self.g.update_all(self.msg[i], self.red[i], self.fnl[i])
             # merge all the heads
             last = mx.nd.concat(
                     *[self.g.pop_n_repr('head%d' % hid) for hid in range(self.num_heads)],
                     dim=1)
         # output projection
         self.g.set_n_repr(self.prp[-1](last))
-        self.g.update_all(gat_message, self.red[-1], self.fnl[-1])
+        self.g.update_all(self.msg[-1], self.red[-1], self.fnl[-1])
         return self.g.pop_n_repr('head0')
 
 def main(args):
