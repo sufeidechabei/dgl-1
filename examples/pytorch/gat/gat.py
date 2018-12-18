@@ -2,7 +2,6 @@
 Graph Attention Networks
 Paper: https://arxiv.org/abs/1710.10903
 Code: https://github.com/PetarV-/GAT
-
 GAT with batch processing
 """
 
@@ -19,10 +18,14 @@ from dgl.data import register_data_args, load_data
 def gat_message(edges):
     return {'ft' : edges.src['ft'], 'a2' : edges.src['a2']}
 
+
 class GATReduce(nn.Module):
     def __init__(self, attn_drop):
         super(GATReduce, self).__init__()
-        self.attn_drop = attn_drop
+        if attn_drop:
+            self.attn_drop = nn.Dropout(p=attn_drop)
+        else:
+            self.attn_drop = 0
 
     def forward(self, nodes):
         a1 = torch.unsqueeze(nodes.data['a1'], 1)  # shape (B, 1, 1)
@@ -31,9 +34,10 @@ class GATReduce(nn.Module):
         # attention
         a = a1 + a2  # shape (B, deg, 1)
         e = F.softmax(F.leaky_relu(a), dim=1)
-        if self.attn_drop != 0.0:
-            e = F.dropout(e, self.attn_drop)
-        return {'accum' : torch.sum(e * ft, dim=1)} # shape (B, D)
+        if self.attn_drop:
+            e = self.attn_drop(e)
+        return {'accum': torch.sum(e * ft, dim=1)}  # shape (B, D)
+
 
 class GATFinalize(nn.Module):
     def __init__(self, headid, indim, hiddendim, activation, residual):
@@ -55,22 +59,28 @@ class GATFinalize(nn.Module):
                 ret = nodes.data['h'] + ret
         return {'head%d' % self.headid : self.activation(ret)}
 
+
 class GATPrepare(nn.Module):
     def __init__(self, indim, hiddendim, drop):
         super(GATPrepare, self).__init__()
         self.fc = nn.Linear(indim, hiddendim)
-        self.drop = drop
+        if drop:
+            self.drop = nn.Dropout(drop)
+        else:
+            self.drop = 0
+
         self.attn_l = nn.Linear(hiddendim, 1)
         self.attn_r = nn.Linear(hiddendim, 1)
 
     def forward(self, feats):
         h = feats
-        if self.drop != 0.0:
-            h = F.dropout(h, self.drop)
+        if self.drop:
+            h = self.drop(h)
         ft = self.fc(h)
         a1 = self.attn_l(ft)
         a2 = self.attn_r(ft)
         return {'h' : h, 'ft' : ft, 'a1' : a1, 'a2' : a2}
+
 
 class GAT(nn.Module):
     def __init__(self,
